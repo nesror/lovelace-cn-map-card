@@ -1,4 +1,4 @@
-console.info("%c  GAODE MAP CARD  \n%c Version 1.2.7 ",
+console.info("%c  GAODE MAP CARD  \n%c Version 1.2.8 ",
 "color: orange; font-weight: bold; background: black", 
 "color: white; font-weight: bold; background: dimgray");
 
@@ -104,15 +104,13 @@ function getRadius(idx, t1, t2) {
     }
 }
 
-const preloadCard = type => window.loadCardHelpers()
-.then(({ createCardElement }) => createCardElement({type}));
+const includeDomains = ["device_tracker","person","zone"];
 
-const LitElement = Object.getPrototypeOf(
-  customElements.get("ha-panel-lovelace")
-);
-const html = LitElement.prototype.html;
-const css = LitElement.prototype.css;
-const includeDomains = ["device_tracker","person"];
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
 class GaodeMapCard extends HTMLElement {
   constructor() {
     super();
@@ -146,7 +144,6 @@ class GaodeMapCard extends HTMLElement {
     ];
 
     this.root = this.attachShadow({ mode: 'open' });
-    if (this.root.lastChild) this.root.removeChild(root.lastChild);
     const style = document.createElement('style');
     style.textContent = this._cssData();
     this.root.appendChild(style);
@@ -169,7 +166,9 @@ class GaodeMapCard extends HTMLElement {
 	          <button type="button" id="refresh">确定</button>
           </div>
         </div>
-        <ha-icon-button id="fitbutton" icon="hass:image-filter-center-focus" title="Reset focus" role="button" tabindex="0" aria-disabled="false"></ha-icon-button>
+        <button type="button" id="fitbutton" title="Reset focus" aria-label="Reset focus">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M5,15H3v4c0,1.1 0.9,2 2,2h4v-2H5v-4M5,5h4V3H5c-1.1,0 -2,0.9 -2,2v4h2V5m14,14h-4v2h4c1.1,0 2,-0.9 2,-2v-4h-2v4m0,-14v4h2V5c0,-1.1 -0.9,-2 -2,-2h-4v2h4M12,17a5,5 0 0,1 -5,-5a5,5 0 0,1 5,-5a5,5 0 0,1 5,5a5,5 0 0,1 -5,5m0,-1.5a3.5,3.5 0 0,0 3.5,-3.5a3.5,3.5 0 0,0 -3.5,-3.5a3.5,3.5 0 0,0 -3.5,3.5a3.5,3.5 0 0,0 3.5,3.5Z"/></svg>
+        </button>
       </div>
     </div>
     `;
@@ -214,9 +213,9 @@ class GaodeMapCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
-    this.entities = this.config.entities; 
+    this.entities = this.config.entities || [];
     this.card.header=this.config.title;
-    if(!this.loaded || this.config.entities.length<1)return;
+    if(!this.loaded || this.entities.length<1)return;
     if(this._isPanel){
       this.root.querySelector("#root").style.paddingBottom = 0;
       this.setAttribute("is-panel","");
@@ -253,37 +252,22 @@ class GaodeMapCard extends HTMLElement {
     }
 
     //更新式样
-    let dark_mode = this.config.dark_mode;
-    let newTheme = hass.themes.default_theme;
+    let dark_mode = this.config.dark_mode || "auto";
     let style = dark_mode;
-    
-    if(this.old_mode!=dark_mode){
-      if(dark_mode!="auto"){
+    let newTheme = (hass.themes && (hass.themes.theme || hass.themes.default_theme)) || "default";
+
+    if(dark_mode!="auto"){
+      if(this.old_mode!=dark_mode){
         this.map.setMapStyle("amap://styles/"+style);
         this.root.querySelector("#map").className = style;
         this.old_mode = dark_mode;
-      }else{
-        let cardColor = hass.themes.themes[newTheme]["primary-background-color"] || "#FFFFF";
-        let lightness = cardColor?w3color(cardColor).lightness:1;
-        let colorDark = lightness<0.5?true:false;
-        style = colorDark?'dark':'normal';
-        this.map.setMapStyle("amap://styles/"+style);
-        this.root.querySelector("#map").className = style;
-        this.old_mode = dark_mode;
-        this.theme=hass.themes.default_theme;
       }
-    }
-    if(dark_mode==="auto"){
-      if(this.theme!=newTheme){
-        let cardColor = hass.themes.themes[newTheme]["primary-background-color"] || "#FFFFF";
-        let lightness = cardColor?w3color(cardColor).lightness:1;
-        let colorDark = lightness<0.5?true:false;
-        style = colorDark?'dark':'normal';
-        this.map.setMapStyle("amap://styles/"+style);
-        this.root.querySelector("#map").className = style;
-        this.old_mode = dark_mode;
-        this.theme=hass.themes.default_theme;
-      }
+    }else if(this.old_mode!=dark_mode || this.theme!=newTheme){
+      style = this._isDarkTheme(hass)?'dark':'normal';
+      this.map.setMapStyle("amap://styles/"+style);
+      this.root.querySelector("#map").className = style;
+      this.old_mode = dark_mode;
+      this.theme = newTheme;
     }
     //实时路况图层
     if(this.config.traffic){
@@ -299,12 +283,26 @@ class GaodeMapCard extends HTMLElement {
     }
   }
   setConfig(config) {
-    preloadCard('map');
-    customElements.get("hui-map-card");
     this.config = deepClone(config);
-    //preloadCard({type:'entities',geo_location_sources :''});
     let d = this.root.querySelector("#root")
     d.style.paddingBottom = 100*(this.config.aspect_ratio||1)+"%";
+  }
+  _themeVars(hass){
+    const themes = hass.themes;
+    if(!themes || !themes.themes) return {};
+    const name = themes.theme || themes.default_theme || "default";
+    const theme = themes.themes[name] || themes.themes.default || {};
+    // HA 2024.4 起主题变量嵌套在 variables 下，旧版是平铺的
+    return theme.variables || theme;
+  }
+  _isDarkTheme(hass){
+    const vars = this._themeVars(hass);
+    const bg = vars["primary-background-color"] || vars["--primary-background-color"] || "#ffffff";
+    try {
+      return w3color(bg).lightness < 0.5;
+    } catch (e) {
+      return false;
+    }
   }
   _loadMap(config){
     
@@ -340,13 +338,14 @@ class GaodeMapCard extends HTMLElement {
     this.root.querySelector('#end_time').value = endTime.format("yyyy-MM-dd hh:mm")
 
     var entityhtml = '<button type="button" id="entity_all">全部</button>'
+    this.entities = this.entities || [];
     this.entities.forEach(function(entity,index) {
       let entityt = typeof entity === "string"?entity:entity.entity;
       if (entityt != 'zone.home') {
-        let objstates = this._hass.states[entityt];
+        let objstates = this._hass && this._hass.states[entityt];
         //let entityName =objstates.attributes.friendly_name?objstates.attributes.friendly_name.split(' ').map(function (part) { return part.substr(0, 1); }).join('') : '';
-        if(objstates.attributes.friendly_name){
-          entityhtml += '<button type="button" id="' + entityt.replace('.', '_') + '">'+objstates.attributes.friendly_name+'</button>'
+        if(objstates && objstates.attributes.friendly_name){
+          entityhtml += '<button type="button" id="' + entityt.replace('.', '_') + '">'+escapeHtml(objstates.attributes.friendly_name)+'</button>'
         }
       
       }
@@ -355,7 +354,9 @@ class GaodeMapCard extends HTMLElement {
     this.entities.forEach(function(entity,index) {
       let entityt = typeof entity === "string"?entity:entity.entity;
       if (entityt != 'zone.home') {
-        this.root.querySelector('#'+entityt.replace('.', '_')).addEventListener('click', function(entityt) {
+        let btn = this.root.querySelector('#'+entityt.replace('.', '_'));
+        if (!btn) return;
+        btn.addEventListener('click', function(entityt) {
                                                                        this._entity(entityt);
                                                                     }.bind(this, entityt));
       }
@@ -431,8 +432,12 @@ class GaodeMapCard extends HTMLElement {
     let hours_to_show =this.config.hours_to_show||0;
     let objstates = this._hass.states[entity];
     let entityPicture = objstates.attributes.entity_picture || '';
-    let entityName =objstates.attributes.friendly_name?objstates.attributes.friendly_name.split(' ').map(function (part) { return part.substr(0, 1); }).join('') : '';
-    let markerContent = `<ha-entity-marker width="20" height="20" entity-id="`+entity+`" entity-name="`+entityName+`" entity-picture="`+entityPicture+`" entity-color="`+color+`"></ha-entity-marker>`
+    let entityName = objstates.attributes.friendly_name || entity;
+    let initial = escapeHtml(entityName.trim().charAt(0).toUpperCase() || "?");
+    let markerContent = entityPicture
+      ? `<div class="entity-marker" style="border-color:${color}"><img src="${escapeHtml(entityPicture)}" alt=""></div>`
+      : `<div class="entity-marker initial" style="background-color:${color}">${initial}</div>`;
+    let zoneContent = `<div class="zone-marker"><svg viewBox="0 0 24 24" width="24" height="24" fill="rgb(255, 152, 0)"><path d="M10,20V14H14V20H19V12H22L12,3L2,12H5V20H10Z"/></svg></div>`;
 
     //区域
     var circle = new AMap.Circle({
@@ -450,7 +455,7 @@ class GaodeMapCard extends HTMLElement {
     let marker = new AMap.Marker({
       map: this.map,
       position: result,
-      content: domain==='zone'?`<ha-icon icon="`+objstates.attributes.icon+`"></ha-icon>`:markerContent,
+      content: domain==='zone'?zoneContent:markerContent,
       zIndex: domain==='zone'?102:103,
       anchor: 'center'
     });
@@ -698,20 +703,48 @@ class GaodeMapCard extends HTMLElement {
                 bottom: 0;
                 left: 10px;
               }
-              .amap-marker ha-icon{
-                position: absolute;
-                bottom: calc(50% - 12px);
-                left: calc(50% - 12px);
+              .amap-marker .zone-marker{
+                display: flex;
+                align-items: center;
+                justify-content: center;
               }
 
-              ha-icon-button {
+              #fitbutton {
                 position: absolute;
                 top: 7px;
                 left: 7px;
+                z-index: 10;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 40px;
+                height: 40px;
+                padding: 0;
+                border: none;
+                border-radius: 50%;
+                background: transparent;
+                cursor: pointer;
               }
-              ha-entity-marker {
-                height: 24px!important;
-                width: 24px!important;
+              .entity-marker {
+                box-sizing: border-box;
+                width: 24px;
+                height: 24px;
+                border-radius: 50%;
+                border: 2px solid;
+                background-color: #fff;
+                overflow: hidden;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                color: #fff;
+                font-size: 13px;
+                font-weight: 500;
+              }
+              .entity-marker img {
+                width: 100%;
+                height: 100%;
+                object-fit: cover;
+                display: block;
               }
               
               #root {
@@ -730,7 +763,7 @@ class GaodeMapCard extends HTMLElement {
                 color:#fff;
               }
               #fitbutton.active {
-                color:var(--paper-item-icon-active-color);
+                color:var(--paper-item-icon-active-color, var(--accent-color, #03a9f4));
               }
               .info {
                 padding: 0.3rem 0.5rem;
@@ -800,259 +833,259 @@ function deepClone(value) {
 }
 customElements.define("gaode-map-card", GaodeMapCard);
 
-export class GaodeMapCardEditor extends LitElement {
+class GaodeMapCardEditor extends HTMLElement {
+  constructor() {
+    super();
+    this.root = this.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent = `
+      :host { display: block; }
+      .card-config { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+      .field { display: flex; flex-direction: column; gap: 4px; }
+      .field > span { font-size: 12px; color: var(--secondary-text-color, #727272); }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; }
+      .row > .field { flex: 1; min-width: 8rem; }
+      input[type="text"], input[type="number"], select {
+        padding: 8px;
+        border-radius: 6px;
+        border: 1px solid var(--divider-color, #e0e0e0);
+        background: var(--card-background-color, #ffffff);
+        color: var(--primary-text-color, #000000);
+        box-sizing: border-box;
+      }
+      label.inline { display: flex; align-items: center; gap: 6px; font-size: 14px; }
+      .entity-row { display: flex; gap: 8px; align-items: center; }
+      .entity-row select { flex: 1; }
+      button {
+        padding: 6px 12px;
+        border-radius: 6px;
+        border: none;
+        background: var(--primary-color, #03a9f4);
+        color: var(--text-primary-color, #ffffff);
+        cursor: pointer;
+      }
+      button.remove { background: transparent; color: var(--error-color, #db4437); border: 1px solid var(--error-color, #db4437); }
+      h3 { margin: 8px 0 0; font-size: 14px; font-weight: 500; }
+      a { color: var(--accent-color, #03a9f4); }
+    `;
+    this.root.appendChild(style);
+    this.form = document.createElement("div");
+    this.form.className = "card-config";
+    this.root.appendChild(this.form);
+    this._hass = undefined;
+    this.config = undefined;
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
 
   setConfig(config) {
     this.config = deepClone(config);
-    this._configEntities = config.entities
-      ? this._processEditorEntities(config.entities)
-      : [];
+    this._render();
   }
-
-  static get properties() {
+  static getStubConfig() {
     return {
-      hass: {},
-      config: {}
+      aspect_ratio: "1",
+      dark_mode: "auto",
+      traffic: false,
+      entities: ["zone.home"],
     };
   }
 
-  render() {
-    var patt = new RegExp("device_tracker|zone|person")
-    if (!this.hass) {
-      return html``;
-    }
-
-    let dark_mode = this.config.dark_mode
-    return html`
-      <div class="card-config">
-        <paper-input
-          label="${this.hass.localize("ui.panel.lovelace.editor.card.generic.title")} (${this.hass.localize("ui.panel.lovelace.editor.card.config.optional")})"
-          .value="${this.config.title}"
-          .configValue="${"title"}"
-          @value-changed="${this._valueChanged}"
-        ></paper-input>
-        <div class="side-by-side">
-          <paper-input
-            label="${this.hass.localize("ui.panel.lovelace.editor.card.generic.aspect_ratio")} (${this.hass.localize("ui.panel.lovelace.editor.card.config.optional")})"
-            .value="${this.config.aspect_ratio}"
-            .configValue="${"aspect_ratio"}"
-            @value-changed="${this._valueChanged}"
-          ></paper-input>
-          <paper-input
-            label="${this.hass.localize("ui.panel.lovelace.editor.card.map.default_zoom")} (${this.hass.localize("ui.panel.lovelace.editor.card.config.optional")})"
-            type="number"
-            .value="${this.config.default_zoom}"
-            .configValue="${"default_zoom"}"
-            @value-changed="${this._valueChanged}"
-          ></paper-input>
-        </div>
-        <div class="side-by-side">
-          <mwc-formfield label="实时路况">
-            <ha-switch
-              ?checked="${this.config.traffic !== false}"
-              .configValue="${"traffic"}"
-              @change="${this._valueChanged}"
-              ></ha-switch>
-              
-          </mwc-formfield>
-          <paper-input
-            label="${this.hass.localize("ui.panel.lovelace.editor.card.map.hours_to_show")} (${this.hass.localize("ui.panel.lovelace.editor.card.config.optional")})"
-            type="number"
-            .value="${this.config.hours_to_show}"
-            .configValue="${"hours_to_show"}"
-            @change="${this._valueChanged}"
-          ></paper-input>
-        </div>
-        <div class="side-by-side">
-          <mwc-formfield label="白天模式">
-              <mwc-radio id="b1" ?checked=${(dark_mode==='normal')} value="normal" name="style_mode" .configValue="${"dark_mode"}" @change="${this._valueChanged}"></mwc-radio>
-          </mwc-formfield>
-          <mwc-formfield label="夜间模式">
-              <mwc-radio id="b2" ?checked=${(dark_mode==='dark')} value="dark" name="style_mode" .configValue="${"dark_mode"}" @change="${this._valueChanged}"></mwc-radio>
-          </mwc-formfield>
-          <mwc-formfield label="跟随主题">
-              <mwc-radio id="b3" ?checked=${(dark_mode==='auto')} value="auto" name="style_mode" .configValue="${"dark_mode"}" @change="${this._valueChanged}"></mwc-radio>
-          </mwc-formfield>
-        </div>
-        <hui-entity-editor
-          .hass="${this.hass}"
-          .entities="${this._configEntities}"
-          .includeDomains=${includeDomains}
-          @entities-changed="${this._entitiesValueChanged}"
-        ></hui-entity-editor>
-
-        <h3>API KEY
-        <a href="//lbs.amap.com/dev/id/newuser" class="" target="_blank">获取KEY</a>
-        </h3>
-        <div class="gaode_key">
-          <paper-input
-            label="${this.hass.localize("component.airvisual.config.step.user.data.api_key")}"
-            .value="${this.config.key}"
-            .configValue="${"key"}"
-            @value-changed="${this._valueChanged}"
-          ></paper-input>
-        </div>
-      </div>
-      <datalist id="browsers">
-      ${Object.keys(this.hass.states).filter(a => patt.test(a) ).map(entId => html`
-          <option value=${entId}>${this.hass.states[entId].attributes.friendly_name || entId}</option>
-        `)}
-      </datalist>
-    `;
+  _entityId(item) {
+    return typeof item === "string" ? item : item.entity;
   }
-  static get styles() {
-    return css `
-    a{
-      color: var(--accent-color);
-    }
-    .side-by-side {
-      display: flex;
-    }
-    .side-by-side > * {
-      flex: 1;
-      padding-right: 4px;
-    }
-    ha-switch{
-      margin-right: 10px;
-    }
-    .entities > * {
-      width: 100%;
-      padding-right: 4px;
 
-    }
-    paper-dropdown-menu{
-      width: 100%;
-      padding-right: 4px;
-    }
-    paper-input-container ha-icon{
-      margin-right: 10px;
-    }
-    `
+  _candidateEntities() {
+    if (!this._hass) return [];
+    return Object.keys(this._hass.states)
+      .filter(id => includeDomains.includes(id.split(".")[0]))
+      .sort();
   }
-  _focusEntity(e){
-    e.target.value = ''
-  }
-  _delEntity(ev){
-    const target = ev.target.previousElementSibling;
-    if (!this.config || !this.hass ) {
-      return;
-    }
-    const entities = this.config.entities
-    let id = -1 ;
-    for (var i=0; i < entities.length ; ++i){
-      if(entities[i]===target.value){
-        id = i
-      }
-    }
-    if(id>-1)entities.splice(id, 1);
-    this.configChanged(this.config)
 
+  _friendlyName(entityId) {
+    const state = this._hass && this._hass.states[entityId];
+    const name = state && state.attributes && state.attributes.friendly_name;
+    return name ? name + " (" + entityId + ")" : entityId;
   }
-  _addEntity(ev){
-    const target = ev.target.value || ev.target.previousElementSibling.value;
-    if (!this.config || !this.hass || !target) {
-      return;
-    }
-    const entities = this.config.entities
-    let flag = true;
-    entities.forEach(item=>{
-      if(target===item){ 
-        flag = false;
-        ev.target.value = ''
-      }
-    })
-    if(flag){
-      entities.push(target)
-      this.config = {
-        ...this.config,
-        "entities": entities
-      };
-      this.configChanged(this.config)
-      ev.target.value = ''
-    }
 
+  _field(labelText, key, type, inputAttrs) {
+    const wrap = document.createElement("div");
+    wrap.className = "field";
+    const span = document.createElement("span");
+    span.textContent = labelText + "（可选）";
+    const input = document.createElement("input");
+    input.type = type || "text";
+    if (inputAttrs) Object.assign(input, inputAttrs);
+    input.value = this.config && this.config[key] !== undefined && this.config[key] !== null ? this.config[key] : "";
+    input.addEventListener("change", () => {
+      const value = input.type === "number" && input.value !== "" ? Number(input.value) : input.value;
+      this._valueChanged(key, value);
+    });
+    wrap.appendChild(span);
+    wrap.appendChild(input);
+    return wrap;
   }
-  _changeEntity(ev){
-    const target = ev.target;
-    if (!this.config || !this.hass || !target) {
-      return;
-    }
-    const entities = this.config.entities
-    let id = -1 ;
-    for (var i=0; i < entities.length ; ++i){
-      if(entities[i]===target.defaultValue){
-        id = i
-      }
-    }
-    if(id>-1){
-      delete entities[id];
-      entities[id] = target.value
-    }
-    this.configChanged(this.config)
-  }
-  _entitiesValueChanged(ev){
-    if (!this.config || !this.hass) {
-      return;
-    }
-    if (ev.detail && ev.detail.entities) {
-      this.config = { ...this.config, entities: ev.detail.entities };
 
-      this._configEntities = this._processEditorEntities(this.config.entities);
-      this.configChanged(this.config)
+  _valueChanged(key, value) {
+    if (!this.config) return;
+    const current = this.config[key];
+    if (current === value) return;
+    if (value === "" || value === undefined || value === null) {
+      const config = { ...this.config };
+      delete config[key];
+      this.configChanged(config);
+    } else {
+      this.configChanged({ ...this.config, [key]: value });
     }
   }
 
-  _valueChanged(ev) {
-    if (!this.config || !this.hass) {
-      return;
-    }
-    const target = ev.target;
-    if (this.config[`${target.configValue}`] === (target.value||target.__checked)) {
-      return;
-    }
-    if (target.configValue) {
-      if (target.value === "") {
-        delete this.config[target.configValue];
-      } else {
-        this.config = {
-          ...this.config,
-          [target.configValue]: target.value||target.__checked
-        };
-      }
-    }
-    this.configChanged(this.config)
-    // fireEvent(this, "config-changed", { config: this.config });
+  _entitiesValueChanged(entities) {
+    this.configChanged({ ...this.config, entities });
   }
 
   configChanged(newConfig) {
-    const event = new Event("config-changed", {
-      bubbles: true,
-      composed: true
-    });
-    event.detail = {config: newConfig};
+    const event = new Event("config-changed", { bubbles: true, composed: true });
+    event.detail = { config: newConfig };
     this.dispatchEvent(event);
   }
-  _processEditorEntities(entities) {
-    return entities.map((entityConf) => {
-      if (typeof entityConf === "string") {
-        return { entity: entityConf };
-      }
-      return entityConf;
+
+  _render() {
+    if (!this._hass || !this.config) return;
+    if (this._rendered && this._renderedConfig === this.config) return;
+    this._rendered = true;
+    this._renderedConfig = this.config;
+    this.form.innerHTML = "";
+
+    // 标题
+    this.form.appendChild(this._field("标题", "title"));
+
+    const row1 = document.createElement("div");
+    row1.className = "row";
+    row1.appendChild(this._field("纵横比", "aspect_ratio", "number"));
+    row1.appendChild(this._field("默认缩放", "default_zoom", "number"));
+    this.form.appendChild(row1);
+
+    const row2 = document.createElement("div");
+    row2.className = "row";
+    // 实时路况
+    const trafficWrap = document.createElement("label");
+    trafficWrap.className = "inline";
+    const traffic = document.createElement("input");
+    traffic.type = "checkbox";
+    traffic.checked = this.config.traffic !== false;
+    traffic.addEventListener("change", () => this._valueChanged("traffic", traffic.checked));
+    trafficWrap.appendChild(traffic);
+    trafficWrap.appendChild(document.createTextNode("实时路况"));
+    row2.appendChild(trafficWrap);
+    // 历史时长
+    const hours = this._field("历史时长(小时)", "hours_to_show", "number");
+    row2.appendChild(hours);
+    this.form.appendChild(row2);
+
+    // 地图模式
+    const modeWrap = document.createElement("div");
+    modeWrap.className = "row";
+    const darkMode = this.config.dark_mode || "auto";
+    [["normal", "白天模式"], ["dark", "夜间模式"], ["auto", "跟随主题"]].forEach(([value, text]) => {
+      const label = document.createElement("label");
+      label.className = "inline";
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "dark_mode";
+      radio.value = value;
+      radio.checked = darkMode === value;
+      radio.addEventListener("change", () => this._valueChanged("dark_mode", value));
+      label.appendChild(radio);
+      label.appendChild(document.createTextNode(text));
+      modeWrap.appendChild(label);
     });
-  }
-  firstUpdated(changedProperties) {
-    import('https://unpkg.com/@material/mwc-radio@0.18.0/mwc-radio.js?module');
-    preloadCard({type:'entities',geo_location_sources :''});
-    customElements.get("hui-entities-card").getConfigElement()
+    this.form.appendChild(modeWrap);
+
+    // 实体列表
+    const entities = Array.isArray(this.config.entities) ? this.config.entities : [];
+    const candidates = this._candidateEntities();
+    entities.forEach((item, index) => {
+      const entityId = this._entityId(item);
+      if (!candidates.includes(entityId)) candidates.push(entityId);
+    });
+    entities.forEach((item, index) => {
+      const row = document.createElement("div");
+      row.className = "entity-row";
+      const select = document.createElement("select");
+      candidates.forEach(id => {
+        const option = document.createElement("option");
+        option.value = id;
+        option.textContent = this._friendlyName(id);
+        if (id === this._entityId(item)) option.selected = true;
+        select.appendChild(option);
+      });
+      select.addEventListener("change", () => {
+        const next = [...entities];
+        next[index] = typeof item === "string" ? select.value : { ...item, entity: select.value };
+        this._entitiesValueChanged(next);
+      });
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "remove";
+      remove.textContent = "删除";
+      remove.addEventListener("click", () => {
+        const next = entities.filter((_, i) => i !== index);
+        this._entitiesValueChanged(next);
+      });
+      row.appendChild(select);
+      row.appendChild(remove);
+      this.form.appendChild(row);
+    });
+    const addWrap = document.createElement("div");
+    addWrap.className = "entity-row";
+    const addSelect = document.createElement("select");
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "-- 添加实体 --";
+    addSelect.appendChild(placeholder);
+    const used = entities.map(item => this._entityId(item));
+    candidates.filter(id => !used.includes(id)).forEach(id => {
+      const option = document.createElement("option");
+      option.value = id;
+      option.textContent = this._friendlyName(id);
+      addSelect.appendChild(option);
+    });
+    const addBtn = document.createElement("button");
+    addBtn.type = "button";
+    addBtn.textContent = "添加";
+    addBtn.addEventListener("click", () => {
+      if (!addSelect.value) return;
+      this._entitiesValueChanged([...entities, addSelect.value]);
+    });
+    addWrap.appendChild(addSelect);
+    addWrap.appendChild(addBtn);
+    this.form.appendChild(addWrap);
+
+    // API KEY
+    const heading = document.createElement("h3");
+    heading.textContent = "API KEY ";
+    const link = document.createElement("a");
+    link.href = "https://lbs.amap.com/dev/id/newuser";
+    link.target = "_blank";
+    link.textContent = "获取KEY";
+    heading.appendChild(link);
+    this.form.appendChild(heading);
+    this.form.appendChild(this._field("高德地图 Key", "key"));
   }
 }
 
 customElements.define("gaode-map-card-editor", GaodeMapCardEditor);
 
 window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "gaode-map-card",
-  name: "地图(中国)",
-  preview: true, // Optional - defaults to false
-  description: "高德地图" // Optional
-});
+if (!window.customCards.some(card => card && card.type === "gaode-map-card")) {
+  window.customCards.push({
+    type: "gaode-map-card",
+    name: "地图(中国)",
+    preview: true, // Optional - defaults to false
+    description: "高德地图", // Optional
+    documentation_url: "https://github.com/fineemb/lovelace-cn-map-card",
+  });
+}

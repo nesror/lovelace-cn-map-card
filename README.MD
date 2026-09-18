@@ -68,6 +68,12 @@
   ````
 + v1.2.7
   + 优化代码,减少载入
++ v1.2.8 ( 适配新版 HomeAssistant 2024.4+ / 2025.x / 2026.x )
+  + 移除对 `LitElement.prototype.html/css` 的依赖(Lit 3 已删除),修复新版报错
+  + 卡片编辑器改为纯 DOM 实现,不再使用已被 HA 删除的 `paper-*`/`mwc-*`/`hui-entity-editor` 组件
+  + 标记点不再依赖 `ha-entity-marker`/`ha-icon`,改用自带样式;缩放按钮不再依赖 `ha-icon-button`
+  + 主题(跟随主题)兼容 HA 2024.4 的 `hass.themes` 新结构(变量嵌套在 `variables` 下)
+  + 详细变更与原因见 `docs/变更说明-09-18.md`
   
 ## 预览
 ![](1.gif)

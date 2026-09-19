@@ -1,4 +1,4 @@
-console.info("%c  GAODE MAP CARD  \n%c Version 1.2.10 ",
+console.info("%c  GAODE MAP CARD  \n%c Version 1.2.11 ",
 "color: orange; font-weight: bold; background: black", 
 "color: white; font-weight: bold; background: dimgray");
 
@@ -867,6 +867,15 @@ class GaodeMapCard extends HTMLElement {
   }
   connectedCallback(){
     // console.log(this.config);
+    this.config = this.config || {};   // 防止 setConfig 尚未调用时下面的体检直接抛错
+    // 前置体检:这两个是"整张地图能不能出来"的硬前提,不满足时明确报出来,
+    // 避免用户只看到一张空白卡片或空地图而不知道该改什么。
+    if(!this.config.key){
+      console.error("GaodeMapCard: 未配置 key。请到 https://lbs.amap.com 申请\"Web端(JS API)\"的 Key 并填入卡片配置,否则地图无法初始化。");
+    }
+    if(!this.config.securityJsCode){
+      console.warn("GaodeMapCard: 未配置 securityJsCode。2021-12 之后申请的 Key 强制要求安全密钥,缺失时地图会加载失败。");
+    }
     // 高德安全密钥(2021-12 之后新申请的 Key 强制要求),由卡片配置注入,
     // 仅在用户显式配置时覆盖全局配置,避免把用户自己的设置清空。
     if(this.config.securityJsCode){
@@ -950,11 +959,13 @@ class GaodeMapCard extends HTMLElement {
     // 并中断整条 set hass(主题、路况、标记点更新全部失效)。
     // 已抽到 _updateMapStyle(),见该方法的说明。
 
-    //实时路况图层
-    if(this.config.traffic){
-      this.trafficLayer.show();
-    }else{
-      this.trafficLayer.hide();
+    //实时路况图层(路况图层初始化失败时 trafficLayer 可能不存在)
+    if(this.trafficLayer){
+      if(this.config.traffic){
+        this.trafficLayer.show();
+      }else{
+        this.trafficLayer.hide();
+      }
     }
     // 更新视界:
     // 不再在这里同步判断 this.fit —— 标记点是异步(坐标转换 / 图片加载)才加入 this.persons 的,
@@ -1040,23 +1051,40 @@ class GaodeMapCard extends HTMLElement {
         viewMode: '3D',
         zoom: this.config.default_zoom || 9
       });
-      // 与 set hass 共用样式逻辑:dark_mode 未配置时归一化为 auto 并按主题解析,
-      // 不会再出现 "amap://styles/undefined" 这种非法请求。
-      // 此时 _hass 可能尚未注入,auto 会先落到 normal,等首次 hass 推送再按主题纠正。
-      this.old_mode = normalizeDarkMode(this.config.dark_mode);
-      this._applyMapStyle(this._resolveMapStyle());
-      
-      //实时路况图层
-      this.trafficLayer = new AMap.TileLayer.Traffic({
-        zIndex: 10
-      });
-      this.trafficLayer.setMap(this.map);
+      // 以下都是"地图加载后的增强步骤",任何一步失败都绝不能阻止 loaded = true。
+      // 历史教训:样式名非法时 setMapStyle 会从高德内部抛错,把整个 .then() 回调打断,
+      // 导致 this.loaded 永远是 false —— 而 set hass 开头就 `if(!this.loaded)return`,
+      // 于是底图能显示、但所有标记点永远不添加,表现为"地图上没有显示实体"。
+      try{
+        // 与 set hass 共用样式逻辑:dark_mode 未配置时归一化为 auto 并按主题解析,
+        // 不会再出现 "amap://styles/undefined" 这种非法请求。
+        // 此时 _hass 可能尚未注入,auto 会先落到 normal,等首次 hass 推送再按主题纠正。
+        this.old_mode = normalizeDarkMode(this.config.dark_mode);
+        this._applyMapStyle(this._resolveMapStyle());
+      }catch(e){
+        console.warn("GaodeMapCard: 应用地图样式失败(不影响标记点显示)", e);
+      }
+
+      try{
+        //实时路况图层
+        this.trafficLayer = new AMap.TileLayer.Traffic({
+          zIndex: 10
+        });
+        this.trafficLayer.setMap(this.map);
+      }catch(e){
+        console.warn("GaodeMapCard: 路况图层初始化失败(不影响标记点显示)", e);
+      }
+
       this.loaded = true;
+      console.info("GaodeMapCard: 地图已就绪 -> 实体 "+((this.config.entities||[]).length)
+        +" 个, key "+(this.config.key?"已配置":"未配置")
+        +", securityJsCode "+(this.config.securityJsCode?"已配置":"未配置")
+        +", rest_key "+(this.config.rest_key?"已配置":"未配置"));
       // 地图就绪后立即刷新一次标记点。
       // 否则只能等下一次 hass 推送才会执行 set hass 的加标记分支,安静环境下地图会长时间空白。
       if(this._hass && this._hass.states)this.hass = this._hass;
     }).catch(e => {
-        console.error("GaodeMapCard: 高德地图加载失败,请检查 key / securityJsCode / 网络", e);
+        console.error("GaodeMapCard: 高德地图加载失败(key / securityJsCode / 网络 / Key 平台类型),地图与标记点都不会显示。原始错误:", e);
     })
 
     const endTime = new Date();
@@ -1129,10 +1157,22 @@ class GaodeMapCard extends HTMLElement {
     if(coordsys==='autonavi')return done(null,list);
 
     const key = this.config.rest_key;
+    const that = this;
     if(!key){
       AMap.convertFrom(locations, type, function(status,result){
         if(result && result.info==='ok')return done(null,result.locations);
-        done(new Error('AMap.convertFrom 失败: '+((result&&result.info)||status)));
+        const info = (result&&result.info)||status;
+        // 这是"标记点不显示"最集中的来源,必须给出可执行建议,否则用户只能看到一张空地图
+        that._warnOnce("norestkey:"+type+":"+info,
+          "坐标转换失败("+info+", type="+type+")。\n"
+          +"  原因:AMap.convertFrom 走的是高德\"坐标转换\"REST 接口,要求 Key 具备\"Web服务(REST API)\"平台权限;\n"
+          +"  而渲染地图的 Key 只能是\"Web端(JS API)\"平台,同一个 Key 不能同时具备两个平台 —— 所以纯 JS API Key 必然失败。\n"
+          +"  处置(任选其一):\n"
+          +"    1) 另申请一个平台为\"Web服务(REST API)\"的 Key,填到卡片配置项 rest_key(推荐,坐标精确);\n"
+          +"    2) 若该实体的坐标本身就是高德坐标(GCJ-02),把它的 type 改为 gaode,跳过转换;\n"
+          +"    3) 若确实是 GPS(WGS-84)坐标、暂时不想申请第二个 Key,可先临时改成 type: gaode 让标记点显示出来,\n"
+          +"       但国内位置会有百米级偏移。");
+        done(new Error("坐标转换失败("+info+"),type="+type));
       });
       return;
     }
@@ -1199,18 +1239,38 @@ class GaodeMapCard extends HTMLElement {
     }
     this.positions[entity] = gps;
   }
+  // 同一原因只提示一次。状态推送非常频繁,不加节流会把控制台刷爆。
+  _warnOnce(key, msg){
+    this._warned = this._warned || {};
+    if(this._warned[key])return;
+    this._warned[key] = true;
+    console.warn("GaodeMapCard: "+msg);
+  }
   _addMarker(entity,index,type){
     
     let color = this._colors[index%this._colors.length];
     let objstates = this._hass.states[entity];
-    if(!objstates || !objstates.attributes.longitude){
+    if(!objstates){
+      // 这里以前是静默返回,用户只能看到"地图上什么都没有",完全无从下手
+      this._warnOnce("missing:"+entity,
+        "实体 "+entity+" 在 hass.states 中不存在,已跳过。请检查实体 ID 是否写错、实体是否已被删除。");
+      this._settle();
+      return
+    } 
+    if(!objstates.attributes.longitude || !objstates.attributes.latitude){
+      this._warnOnce("nocoord:"+entity,
+        "实体 "+entity+" 没有 longitude/latitude 属性,无法定位(已跳过)。"
+        +"person 实体需要挂一个带 GPS 的 device_tracker 作为来源,zone 需要配置圆心坐标。");
       this._settle();
       return
     } 
     let gps = new AMap.LngLat(objstates.attributes.longitude, objstates.attributes.latitude);
     let that = this;
     this._convertFrom(gps, type, function (err, result) {
-      if (!err) {
+      if (err) {
+        that._warnOnce("marker:"+entity,
+          "实体 "+entity+" 的标记点未能加入地图: "+err.message+"(详见上方该原因的一次性说明)");
+      } else {
         that._showMarker(result, entity, color, type);
       }
       // 坐标缺失、转换失败都要结算,否则 _checkFit 永远达不到 entities.length
@@ -1231,19 +1291,7 @@ class GaodeMapCard extends HTMLElement {
       : `<div class="entity-marker initial" style="background-color:${color}">${initial}</div>`;
     let zoneContent = `<div class="zone-marker"><svg viewBox="0 0 24 24" width="24" height="24" fill="rgb(255, 152, 0)"><path d="M10,20V14H14V20H19V12H22L12,3L2,12H5V20H10Z"/></svg></div>`;
 
-    //区域
-    var circle = new AMap.Circle({
-      center: result,  // 圆心位置
-      radius: objstates.attributes.radius || objstates.attributes.gps_accuracy, // 圆半径
-      fillColor: domain==='zone'?'rgb(255, 152, 0)':color,   // 圆形填充颜色
-      fillOpacity: 0.2,
-      zIndex: 101,
-      strokeColor: domain==='zone'?'rgb(255, 152, 0)':color, // 描边颜色
-      strokeWeight: 3, // 描边宽度
-    });
-    this.map.add(circle);
-    
-    //标记点
+    //标记点(先建标记点:它是主体,后面的精度圈只是附属,附属失败不能连累标记点)
     let marker = new AMap.Marker({
       map: this.map,
       position: result,
@@ -1251,14 +1299,36 @@ class GaodeMapCard extends HTMLElement {
       zIndex: domain==='zone'?102:103,
       anchor: 'center'
     });
+    this.markers[entity] = marker;
     if(domain==='person'||domain==='device_tracker'){
       this.persons.push(marker);
-      //历史路径
-      if(hours_to_show>0){
-        this._gethistory(hours_to_show, entity, color, type)
+    }
+
+    // 区域/精度圈。radius 来自 zone 的 radius 或实体的 gps_accuracy,
+    // 很多 device_tracker 两者都没有,此时不做无意义的兜底(半径 0 的圈没有意义),
+    // 同时也避免把非法 radius 传给高德导致整段 _showMarker 抛错。
+    const radius = Number(objstates.attributes.radius || objstates.attributes.gps_accuracy);
+    if(isFinite(radius) && radius > 0){
+      try{
+        var circle = new AMap.Circle({
+          center: result,  // 圆心位置
+          radius: radius,  // 圆半径
+          fillColor: domain==='zone'?'rgb(255, 152, 0)':color,   // 圆形填充颜色
+          fillOpacity: 0.2,
+          zIndex: 101,
+          strokeColor: domain==='zone'?'rgb(255, 152, 0)':color, // 描边颜色
+          strokeWeight: 3, // 描边宽度
+        });
+        this.map.add(circle);
+      }catch(e){
+        console.warn("GaodeMapCard: 实体 "+entity+" 的范围圈绘制失败(不影响标记点显示)", e);
       }
     }
-    this.markers[entity] = marker;
+
+    //历史路径
+    if((domain==='person'||domain==='device_tracker') && hours_to_show>0){
+      this._gethistory(hours_to_show, entity, color, type)
+    }
   }
   _entity(entity) {
     const that  = this;

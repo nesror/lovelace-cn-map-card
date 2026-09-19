@@ -1,4 +1,4 @@
-console.info("%c  GAODE MAP CARD  \n%c Version 1.2.9 ",
+console.info("%c  GAODE MAP CARD  \n%c Version 1.2.10 ",
 "color: orange; font-weight: bold; background: black", 
 "color: white; font-weight: bold; background: dimgray");
 
@@ -767,6 +767,29 @@ function escapeHtml(value) {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
   }[c]));
 }
+
+// dark_mode 取值归一化。接受:
+//   "auto"                       跟随主题
+//   true / "dark"                夜间
+//   false / "normal"             白天
+//   高德内置样式名(light/grey/…)  原样透传
+//   自定义样式 ID(控制台发布)      原样透传,也兼容直接粘贴 "amap://styles/xxx"
+// 其余(undefined / null / 数字 / 布尔型字符串 / 对象 / 含特殊字符)一律回退 "auto"。
+// 归一化是必须的:非法样式名会被拼成 "amap://styles/undefined" / "amap://styles/0" 之类
+// 交给 setMapStyle,高德内部加载失败后 mapStyle 保持 undefined,紧接着 _getUserStyle 里
+// i.mapStyle.pn(...) 抛 TypeError: Cannot read properties of undefined (reading 'pn')。
+function normalizeDarkMode(value) {
+  if (value === undefined || value === null) return "auto";
+  if (typeof value === "boolean") return value ? "dark" : "normal";
+  if (typeof value !== "string") return "auto";   // 数字 / 对象 / 数组都是配置错误
+  let s = value.trim();
+  if (s.indexOf("amap://styles/") === 0) s = s.slice("amap://styles/".length);
+  if (!s) return "auto";
+  if (/^\d+$/.test(s)) return "auto";             // YAML 里写成 0 / 1 的情况
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(s)) return "auto";
+  if (s === "true" || s === "false") return "auto";   // YAML 引号包裹导致的字符串布尔误配
+  return s;
+}
 class GaodeMapCard extends HTMLElement {
   constructor() {
     super();
@@ -877,6 +900,9 @@ class GaodeMapCard extends HTMLElement {
     this._hass = hass;
     this.entities = this.config.entities || [];
     this.card.header=this.config.title;
+    // 地图样式/主题与 entities 无关,必须在下面的实体早退之前执行,
+    // 否则 entities 为空(或地图尚未就绪)时 dark_mode: auto 永远不会跟随主题切换。
+    this._updateMapStyle(hass);
     if(!this.loaded || this.entities.length<1)return;
     if(this._isPanel){
       this.root.querySelector("#root").style.paddingBottom = 0;
@@ -917,23 +943,13 @@ class GaodeMapCard extends HTMLElement {
     }
 
     //更新式样
-    let dark_mode = this.config.dark_mode || "auto";
-    let style = dark_mode;
-    let newTheme = (hass.themes && (hass.themes.theme || hass.themes.default_theme)) || "default";
+    // 注意:dark_mode 过去是原样拼进 "amap://styles/"+style 的,没有做取值校验。
+    // 未配置 dark_mode -> "amap://styles/undefined";dark_mode: true -> "amap://styles/true"。
+    // 样式名非法时高德内部加载失败,mapStyle 保持 undefined,紧接着 _getUserStyle 里
+    // i.mapStyle.pn(...) 就抛 TypeError: Cannot read properties of undefined (reading 'pn'),
+    // 并中断整条 set hass(主题、路况、标记点更新全部失效)。
+    // 已抽到 _updateMapStyle(),见该方法的说明。
 
-    if(dark_mode!="auto"){
-      if(this.old_mode!=dark_mode){
-        this.map.setMapStyle("amap://styles/"+style);
-        this.root.querySelector("#map").className = style;
-        this.old_mode = dark_mode;
-      }
-    }else if(this.old_mode!=dark_mode || this.theme!=newTheme){
-      style = this._isDarkTheme(hass)?'dark':'normal';
-      this.map.setMapStyle("amap://styles/"+style);
-      this.root.querySelector("#map").className = style;
-      this.old_mode = dark_mode;
-      this.theme = newTheme;
-    }
     //实时路况图层
     if(this.config.traffic){
       this.trafficLayer.show();
@@ -944,6 +960,22 @@ class GaodeMapCard extends HTMLElement {
     // 不再在这里同步判断 this.fit —— 标记点是异步(坐标转换 / 图片加载)才加入 this.persons 的,
     // 同步判断时 this.persons 往往是空的,setFitView 等效于没执行,地图会一直停在默认中心。
     // 现在由每个标记点 resolve 后的 _settle() -> _checkFit() 触发。
+  }
+  // 地图样式/主题的唯一更新入口(与实体无关,故从 set hass 早退之前调用)
+  _updateMapStyle(hass){
+    let dark_mode = normalizeDarkMode(this.config.dark_mode);
+    let newTheme = (hass.themes && (hass.themes.theme || hass.themes.default_theme)) || "default";
+
+    if(dark_mode!="auto"){
+      if(this.old_mode!=dark_mode){
+        this._applyMapStyle(dark_mode);
+        this.old_mode = dark_mode;
+      }
+    }else if(this.old_mode!=dark_mode || this.theme!=newTheme){
+      this._applyMapStyle(this._isDarkTheme(hass)?'dark':'normal');
+      this.old_mode = dark_mode;
+      this.theme = newTheme;
+    }
   }
   // 每个实体无论成功标记、坐标缺失还是转换失败都只调用一次,保证计数不会卡住
   _settle(){
@@ -956,12 +988,34 @@ class GaodeMapCard extends HTMLElement {
     if(!this.map || !this.persons.length)return;
     this.map.setFitView(this.persons, false, [40, 40, 40, 40]);
   }
+  // dark_mode 取值归一化见模块级 normalizeDarkMode()(编辑器也要用,故不放在类里)
+  _resolveMapStyle(){
+    const mode = normalizeDarkMode(this.config.dark_mode);
+    if(mode!=="auto")return mode;
+    return this._isDarkTheme(this._hass)?"dark":"normal";
+  }
+  // 设置地图样式与 #map 的 className 的唯一出口。
+  // 高德的 setMapStyle 在样式名非法时会从内部抛错(而不是返回失败),因此必须兜底,
+  // 否则整条 set hass 会在这里中断,后续的主题判断、路况图层、标记点更新全部不执行。
+  _applyMapStyle(style){
+    if(!this.map)return;
+    try{
+      this.map.setMapStyle("amap://styles/"+style);
+    }catch(e){
+      console.warn("GaodeMapCard: 地图样式 \""+style+"\" 设置失败,回退 normal :", e);
+      style = "normal";
+      try{ this.map.setMapStyle("amap://styles/normal"); }catch(e2){}
+    }
+    let mapEl = this.root.querySelector("#map");
+    if(mapEl)mapEl.className = style;
+  }
   setConfig(config) {
     this.config = deepClone(config);
     let d = this.root.querySelector("#root")
     d.style.paddingBottom = 100*(this.config.aspect_ratio||1)+"%";
   }
   _themeVars(hass){
+    if(!hass || !hass.themes) return {};
     const themes = hass.themes;
     if(!themes || !themes.themes) return {};
     const name = themes.theme || themes.default_theme || "default";
@@ -986,11 +1040,11 @@ class GaodeMapCard extends HTMLElement {
         viewMode: '3D',
         zoom: this.config.default_zoom || 9
       });
-      let mode = this.config.dark_mode;
-      let style = (mode==="auto")?"normal":mode;
-      this.old_mode = mode;
-      this.map.setMapStyle("amap://styles/"+style);
-      this.root.querySelector("#map").className = style;
+      // 与 set hass 共用样式逻辑:dark_mode 未配置时归一化为 auto 并按主题解析,
+      // 不会再出现 "amap://styles/undefined" 这种非法请求。
+      // 此时 _hass 可能尚未注入,auto 会先落到 normal,等首次 hass 推送再按主题纠正。
+      this.old_mode = normalizeDarkMode(this.config.dark_mode);
+      this._applyMapStyle(this._resolveMapStyle());
       
       //实时路况图层
       this.trafficLayer = new AMap.TileLayer.Traffic({
@@ -1725,7 +1779,8 @@ class GaodeMapCardEditor extends HTMLElement {
     // 地图模式
     const modeWrap = document.createElement("div");
     modeWrap.className = "row";
-    const darkMode = this.config.dark_mode || "auto";
+    // 归一化后再比对,否则 dark_mode: false 会被 `|| "auto"` 吞成 "跟随主题"(与卡片实际行为不符)
+    const darkMode = normalizeDarkMode(this.config.dark_mode);
     [["normal", "白天模式"], ["dark", "夜间模式"], ["auto", "跟随主题"]].forEach(([value, text]) => {
       const label = document.createElement("label");
       label.className = "inline";

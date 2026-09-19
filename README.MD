@@ -83,6 +83,12 @@
   + 不再在模块顶层无条件写 `window._AMapSecurityConfig = { securityJsCode:'' }`(会覆盖用户自己的安全密钥),改为由 `securityJsCode` 配置项注入
   + 地图加载完成后立即刷新一次标记点,不再需要等下一次状态推送
   + 详细变更与原因见 `docs/变更说明-09-19.md`
+
++ v1.2.10 ( 修复 `dark_mode` 配置导致的高德内部崩溃 )
+  + 修复 `TypeError: Cannot read properties of undefined (reading 'pn')`。`dark_mode` 取值过去原样拼进 `amap://styles/<值>`,非法样式名会让高德内部加载失败并抛错,同时中断整条状态更新。已统一做取值归一化,并对 `setMapStyle` 兜底
+  + `dark_mode` 兼容 `true`/`false`(夜间/白天)、`auto`、高德内置样式名、自定义样式 ID;无法识别的取值回退 `auto`
+  + 地图样式/主题更新不再受 `entities` 为空的影响(原先 `entities` 为空时整条更新直接早退)
+  + 详细变更与原因见 `docs/变更说明-09-19.md` 的「追加修复」一节
   
 ## 预览
 ![](1.gif)
@@ -121,7 +127,7 @@
 | title | string | 选项 | 卡片标题
 | entities | entity id | **必选** | 需要显示的条目,支持person,zone,device_tracker
 | default_zoom | Number | 选项 | 地图默认缩放等级
-| dark_mode | boolean | 选项 | 地图夜间黑暗模式开关
+| dark_mode | string / boolean | `auto` | 地图样式。`auto` 跟随主题;`true`/`dark` 夜间;`false`/`normal` 白天;也可填高德内置样式名(`light`/`grey`/…)或你在控制台发布的自定义样式 ID。无法识别的取值自动回退 `auto` |
 | traffic | boolean | 选项 | 实时路况
 | hours_to_show | Number | 选项 | 指定时间内的历史路径,这里是填的是小时
 | key | string | **必选** | 自己去高德申请key,内置的key说不定哪天就失效了.
@@ -158,3 +164,18 @@ entities:
 - 未配置 `rest_key` 时行为与旧版本完全一致(仍走 `AMap.convertFrom`),不影响现有配置。
 - 历史轨迹可能上千个点,而 REST 坐标转换接口单次上限 40 个点,卡片已自动分批请求。
 - `type: gaode` 的实体本身已是高德(GCJ-02)坐标,不需要转换,也不消耗 `rest_key`。
+
+## 关于 `Cannot read properties of undefined (reading 'pn')`
+
+该报错抛在高德 JS API 内部(`x.prototype._getUserStyle` 里的 `i.mapStyle.pn(...)`),根因在**配置侧**:
+
+`dark_mode` 的取值过去被原样拼进 `amap://styles/<值>` —— 未配置 `dark_mode` 时是 `amap://styles/undefined`,
+写 `dark_mode: true` 时是 `amap://styles/true`。样式名非法 → 高德内部样式加载失败 → 内部 `mapStyle` 保持 `undefined`
+→ `_getUserStyle` 读取 `mapStyle.pn` 抛 `TypeError`,并**中断整条状态更新**(主题、路况、标记点都不再刷新)。
+
+v1.2.10 起:
+
+- 取值统一归一化,无法识别的取值回退 `auto`,不会再有 `undefined` / `true` 这类样式名;
+- `setMapStyle` 增加兜底,即便样式名非法也只回退 `normal` 并打一条 warn,不再中断更新。
+
+若升级后仍看到该报错,先确认浏览器加载的是新文件(强刷 / 清缓存),控制台首行应显示 `Version 1.2.10`。

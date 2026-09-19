@@ -74,6 +74,15 @@
   + 标记点不再依赖 `ha-entity-marker`/`ha-icon`,改用自带样式;缩放按钮不再依赖 `ha-icon-button`
   + 主题(跟随主题)兼容 HA 2024.4 的 `hass.themes` 新结构(变量嵌套在 `variables` 下)
   + 详细变更与原因见 `docs/变更说明-09-18.md`
+
++ v1.2.9 ( 修复 [#24](https://github.com/fineemb/lovelace-cn-map-card/issues/24) 所述的三个"地图/标记点不显示"问题 )
+  + **`w3color.js` 内联进 `cn-map-card.js`**,单文件自包含。原来 `import './w3color.js'` 依赖 HACS 一并下载同目录文件,但 HACS plugin 类型只支持声明单个 `filename`,该请求会 404 并导致整个 ES module 加载失败(卡片与编辑器完全不渲染)
+  + **`hacs.json` 补回 `content_in_root` / `filename`**,否则 HACS 会去 `dist/` 找一个不存在的文件名
+  + **修复 `setFitView` 竞态**:从"遍历实体后同步判断"改为"每个标记点真正加入地图后再触发自适应视野",修复地图停在默认中心(北京)、看起来像标记点不显示的假象
+  + **新增可选配置 `rest_key`**:`gps`/`baidu`/`mapbar` 坐标改用高德 REST 接口转换,绕开 `AMap.convertFrom` 对绝大多数 Key 必然失败的问题(`USERKEY_PLAT_NOMATCH` / `INVALID_USER_SCODE`)
+  + 不再在模块顶层无条件写 `window._AMapSecurityConfig = { securityJsCode:'' }`(会覆盖用户自己的安全密钥),改为由 `securityJsCode` 配置项注入
+  + 地图加载完成后立即刷新一次标记点,不再需要等下一次状态推送
+  + 详细变更与原因见 `docs/变更说明-09-19.md`
   
 ## 预览
 ![](1.gif)
@@ -116,3 +125,36 @@
 | traffic | boolean | 选项 | 实时路况
 | hours_to_show | Number | 选项 | 指定时间内的历史路径,这里是填的是小时
 | key | string | **必选** | 自己去高德申请key,内置的key说不定哪天就失效了.
+| securityJsCode | string | 选项 | 高德安全密钥,2021年12月后申请的新Key必填
+| rest_key | string | 选项 | 单独申请的、平台为**Web服务(REST API)**的Key,仅用于坐标转换,见下方说明
+| angle | entity id | 选项 | 方向传感器实体,开启追踪(点击左上角按钮)时地图自动旋转
+
+## 关于 `rest_key`(标记点不显示时先看这条)
+
+实体坐标不是高德坐标时(默认 `type: gps`,另有 `baidu` / `mapbar`),卡片需要做一次坐标系转换。
+
+原实现调用的是 `AMap.convertFrom`,而该接口内部请求的是高德"坐标转换"REST 接口,**要求 Key 具备"Web服务(REST API)"平台权限**;但用来渲染地图的 Key 只能是"Web端(JS API)"平台 —— 同一个 Key 不能同时具备两个平台。因此对于按官方文档申请的普通 Key,这个转换是**必然失败**的,表现为实体坐标无法定位、标记点不显示(控制台可见 `INVALID_USER_SCODE` / `USERKEY_PLAT_NOMATCH`)。
+
+解决办法:另外申请一个平台为 **Web服务(REST API)** 的 Key,配置到 `rest_key`:
+
+```yaml
+type: 'custom:gaode-map-card'
+key: 你的Web端(JS API)Key
+securityJsCode: 你的安全密钥
+rest_key: 你的Web服务(REST API)Key
+entities:
+  - person.a
+  - device_tracker.b
+```
+
+```yaml
+# 需要分别指定坐标体系时
+entities:
+  - entity: person.a          # 默认 gps,走 rest_key 转换
+  - entity: person.b
+    type: gaode               # 已是高德坐标,不需要转换
+```
+
+- 未配置 `rest_key` 时行为与旧版本完全一致(仍走 `AMap.convertFrom`),不影响现有配置。
+- 历史轨迹可能上千个点,而 REST 坐标转换接口单次上限 40 个点,卡片已自动分批请求。
+- `type: gaode` 的实体本身已是高德(GCJ-02)坐标,不需要转换,也不消耗 `rest_key`。

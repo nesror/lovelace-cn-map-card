@@ -1,5 +1,7 @@
 {
-    "name": "Gaode Map card",
-    "render_readme": true,
-    "country": ["CN"]
-  }
+  "name": "Gaode Map card",
+  "render_readme": true,
+  "country": ["CN"],
+  "content_in_root": true,
+  "filename": "cn-map-card.js"
+}

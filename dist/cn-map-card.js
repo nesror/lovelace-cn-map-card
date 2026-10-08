@@ -887,6 +887,15 @@ class GaodeMapCard extends HTMLElement {
       plugins: ['AMap.MoveAnimation'], //插件列表
       securityJsCode: this.config.securityJsCode || undefined
     });
+    if (!this._resizeObserver) {
+      this._resizeObserver = new ResizeObserver(() => {
+        if (this.map) this.map.resize();
+      });
+    }
+    this._resizeObserver.observe(this.root.querySelector("#container"));
+  }
+  disconnectedCallback(){
+    if (this._resizeObserver) this._resizeObserver.disconnect();
   }
   static getConfigElement() {
     return document.createElement("gaode-map-card-editor");

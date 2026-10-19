@@ -1,4 +1,4 @@
-console.info("%c  GAODE MAP CARD  \n%c Version 1.2.11 ",
+console.info("%c  GAODE MAP CARD  \n%c Version 1.2.12 ",
 "color: orange; font-weight: bold; background: black", 
 "color: white; font-weight: bold; background: dimgray");
 
@@ -662,25 +662,25 @@ function w3SetColorsByAttribute() {
   }
 }
 
-Date.prototype.format = function(fmt) { 
-     var o = { 
-        "M+" : this.getMonth()+1,                 //月份 
-        "d+" : this.getDate(),                    //日 
-        "h+" : this.getHours(),                   //小时 
-        "m+" : this.getMinutes(),                 //分 
-        "s+" : this.getSeconds(),                 //秒 
-        "q+" : Math.floor((this.getMonth()+3)/3), //季度 
-        "S"  : this.getMilliseconds()             //毫秒 
-    }; 
-    if(/(y+)/.test(fmt)) {
-            fmt=fmt.replace(RegExp.$1, (this.getFullYear()+"").substr(4 - RegExp.$1.length)); 
-    }
-     for(var k in o) {
-        if(new RegExp("("+ k +")").test(fmt)){
-             fmt = fmt.replace(RegExp.$1, (RegExp.$1.length==1) ? (o[k]) : (("00"+ o[k]).substr((""+ o[k]).length)));
-         }
-     }
-    return fmt; 
+// 把 Date 写成 <input type="datetime-local"> 能接受的格式。
+// 必须是 "YYYY-MM-DDTHH:mm"(T 分隔)。用空格分隔时浏览器判定为非法值,会把 input.value
+// 直接置空 —— 这正是历史轨迹取不到时间范围、进而整条轨迹不显示的根本原因。
+// 同时不再改写 Date.prototype.format(会污染全局 Date 原型,与其它卡片/集成冲突)。
+function formatLocalInput(d) {
+  const p = n => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate())
+       + "T" + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+
+// 解析 datetime-local 的取值,显式按"本地时间"构造 Date。
+// 不用 new Date(string):"yyyy-MM-dd hh:mm"(空格分隔、无秒)在 Safari 上是 Invalid Date,
+// 随后 toISOString() 抛 RangeError,轨迹静默消失。
+function parseLocalInput(value) {
+  if (!value) return null;
+  const m = String(value).trim().match(/^(\d{4})-(\d{1,2})-(\d{1,2})[T ](\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) return null;
+  const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0), 0);
+  return isNaN(d.getTime()) ? null : d;
 }
 
 function controlArrayLength(arr) {
@@ -1098,12 +1098,14 @@ class GaodeMapCard extends HTMLElement {
 
     const endTime = new Date();
     const startTime = new Date();
-    let hours_to_show =this.config.hours_to_show||0;
-    //startTime.setHours(endTime.getHours() - hours_to_show);
-    startTime.setHours(0, 0, 0, 0);
+    const hours_to_show = Number(this.config.hours_to_show) || 0;
+    // hours_to_show 才是文档里的"历史轨迹时长",用它决定默认查询窗口;
+    // 未配置时退化为"今天 00:00 至今"。底部的时间控件可随时手动覆盖。
+    if(hours_to_show > 0)startTime.setTime(endTime.getTime() - hours_to_show*3600*1000);
+    else startTime.setHours(0, 0, 0, 0);
 
-    this.root.querySelector('#start_time').value = startTime.format("yyyy-MM-dd hh:mm")
-    this.root.querySelector('#end_time').value = endTime.format("yyyy-MM-dd hh:mm")
+    this.root.querySelector('#start_time').value = formatLocalInput(startTime)
+    this.root.querySelector('#end_time').value = formatLocalInput(endTime)
 
     var entityhtml = '<button type="button" id="entity_all">全部</button>'
     this.entities = this.entities || [];
@@ -1193,7 +1195,7 @@ class GaodeMapCard extends HTMLElement {
     const chunks = [];
     for(let i=0;i<list.length;i+=40)chunks.push(list.slice(i,i+40));
 
-    Promise.all(chunks.map(function(chunk){
+    const fetchChunk = function(chunk){
       const locstr = chunk.map(function(p){ const c = toPair(p); return c[0]+','+c[1]; }).join(';');
       const url = "https://restapi.amap.com/v3/assistant/coordinate/convert"
                 + "?locations=" + locstr
@@ -1208,9 +1210,21 @@ class GaodeMapCard extends HTMLElement {
           return new AMap.LngLat(parseFloat(a[0]),parseFloat(a[1]));
         });
       });
-    })).then(function(results){
+    };
+
+    // 逐批串行发送。原先用 Promise.all 一次性并发几十个请求,1000 个点的轨迹会瞬间打出
+    // 25 个并发请求,极易触发高德 QPS 限制(CUQPS_HAS_EXCEEDED_THE_LIMIT),整条轨迹直接失败。
+    // 串行天然保证顺序,代价只是多几次往返。
+    const results = new Array(chunks.length);
+    let chain = Promise.resolve();
+    chunks.forEach(function(chunk, idx){
+      chain = chain.then(function(){
+        return fetchChunk(chunk).then(function(r){ results[idx] = r; });
+      });
+    });
+    chain.then(function(){
       let out = [];
-      results.forEach(function(r){ out = out.concat(r); });
+      results.forEach(function(r){ if(r)out = out.concat(r); });
       done(null,out);
     }).catch(function(err){
       console.warn("GaodeMapCard: REST 坐标转换失败,请检查 rest_key 是否为\"Web服务(REST API)\"类型的 Key:", err);
@@ -1223,7 +1237,6 @@ class GaodeMapCard extends HTMLElement {
       return
     } 
     let gps = [objstates.attributes.longitude, objstates.attributes.latitude];
-    let hours_to_show =this.config.hours_to_show||0;
     let newLngLat = new AMap.LngLat(gps[0],gps[1])
     let oldLngLat = new AMap.LngLat(gps[0],gps[1])
     if(this.positions[entity]){
@@ -1241,8 +1254,9 @@ class GaodeMapCard extends HTMLElement {
         that.markers[entity].moveTo(result, {
             autoRotation: false
         })
-        if(hours_to_show>0 && that.trace){
-          that._gethistory(hours_to_show, entity, "", type)
+        if(that.trace){
+          // 追踪模式下随位置刷新轨迹;颜色按实体取,不能传空串(空串画出来是不可见的线)
+          that._gethistory(entity, that._entityColor(entity), type)
         }
       });
     }
@@ -1254,6 +1268,13 @@ class GaodeMapCard extends HTMLElement {
     if(this._warned[key])return;
     this._warned[key] = true;
     console.warn("GaodeMapCard: "+msg);
+  }
+  // 非异常情况的诊断信息(用 info 级别,避免把"这段时间没动过"当成警告刷屏)
+  _logOnce(key, msg){
+    this._logged = this._logged || {};
+    if(this._logged[key])return;
+    this._logged[key] = true;
+    console.info("GaodeMapCard: "+msg);
   }
   _addMarker(entity,index,type){
     
@@ -1290,7 +1311,6 @@ class GaodeMapCard extends HTMLElement {
   _showMarker(result,entity,color,type){
     
     let domain = entity.split('.')[0];
-    let hours_to_show =this.config.hours_to_show||0;
     let objstates = this._hass.states[entity];
     let entityPicture = objstates.attributes.entity_picture || '';
     let entityName = objstates.attributes.friendly_name || entity;
@@ -1334,9 +1354,10 @@ class GaodeMapCard extends HTMLElement {
       }
     }
 
-    //历史路径
-    if((domain==='person'||domain==='device_tracker') && hours_to_show>0){
-      this._gethistory(hours_to_show, entity, color, type)
+    //历史路径。不再要求 hours_to_show > 0 —— 未配置时默认查询"今天 00:00 至今",
+    //与卡片底部时间控件的默认值一致;原先的门槛会让不写 hours_to_show 的用户永远没有轨迹。
+    if(domain==='person'||domain==='device_tracker'){
+      this._gethistory(entity, color, type)
     }
   }
   _entity(entity) {
@@ -1375,158 +1396,150 @@ class GaodeMapCard extends HTMLElement {
          }
     }
   }
-  _gethistory(hours, entity, color, type){
-    //const endTime = new Date();
-    //const startTime = new Date();
-    //startTime.setHours(endTime.getHours() - hours);
+  // 历史查询窗口。优先用卡片底部的时间控件;控件为空 / 非法 / 顺序颠倒时回退到:
+  //   hours_to_show > 0 -> [now - hours_to_show, now]
+  //   否则               -> [今天 00:00, now](与 _loadMap 初始化控件的规则一致)
+  _historyWindow(){
+    const hrs = Number(this.config.hours_to_show) || 0;
+    const now = new Date();
+    const fbStart = new Date(now.getTime());
+    if(hrs > 0)fbStart.setTime(now.getTime() - hrs*3600*1000);
+    else fbStart.setHours(0,0,0,0);
 
-    const that  = this;
-    //alert(that.root.querySelector('#start_time').value)
-    const startTime = new Date(that.root.querySelector('#start_time').value)
-    const endTime = new Date(that.root.querySelector('#end_time').value)
-    this._hass.callApi("GET", "history/period/"+startTime.toISOString()+"?filter_entity_id="+entity+"&significant_changes_only=0&end_time="+endTime.toISOString())
-    .then(function(res) {
-      let arr = controlArrayLength(res[0])
-      
-      if (arr.length > 1 && that.historyPath[entity] != arr.length) {
-        that.historyPath[entity] = arr.length;
-        var lineArr = []
-        var infoArr = []
-	var waitArr = []
-        for(var i in arr) {
-          let p = arr[i].attributes;
-          if(p.longitude)lineArr.push(new AMap.LngLat(p.longitude,p.latitude));
+    const startEl = this.root.querySelector('#start_time');
+    const endEl = this.root.querySelector('#end_time');
+    let start = parseLocalInput(startEl && startEl.value);
+    let end = parseLocalInput(endEl && endEl.value);
+    if(!start || !end || start.getTime() >= end.getTime()){
+      start = fbStart;
+      end = now;
+    }
+    return {start:start, end:end};
+  }
+  // 与 _addMarker 的取色规则保持一致,供轨迹/圆点使用。
+  // 之前 _updateMarker 传的是空串,strokeColor:"" 画出来的线是不可见的。
+  _entityColor(entity){
+    const list = this.entities || [];
+    for(let i=0;i<list.length;i++){
+      const id = typeof list[i]==='string'?list[i]:list[i].entity;
+      if(id===entity)return this._colors[i%this._colors.length];
+    }
+    return this._colors[0];
+  }
+  // 轨迹折线与停留点是同一份数据的两种表现,必须一起重建:
+  // 只 setPath 不重建圆点,圆点会停在旧位置。
+  _drawTrail(entity, path2, info2, wait2, color){
+    if(!path2 || path2.length < 2)return;
+    const that = this;
+    if(this.paths[entity]){
+      this.paths[entity].setPath(path2);
+    }else{
+      this.paths[entity] = new AMap.Polyline({
+        map: this.map,
+        path: path2,
+        zIndex: 200,
+        strokeWeight: 6,
+        strokeColor: color,
+        strokeOpacity: 0.5,
+        showDir: true,
+        lineJoin: 'round'
+      });
+    }
 
-          let radius = [0, 0]
-          if (parseInt(i) + 1 < arr.length) {
-              radius = getRadius(i, arr[i].last_updated, arr[(parseInt(i)+1).toString()].last_updated);
-              if(p.longitude)waitArr.push(radius[0]);
-	  } else {
-              radius = getRadius(i, arr[i].last_updated, undefined);
-              if(p.longitude)waitArr.push(radius[0]);
-	  }
+    // 清掉上一轮的停留点,避免位置错乱与对象泄漏
+    if(this.circle[entity] && this.circle[entity].length){
+      this.circle[entity].forEach(function(c){ try{ c.setMap(null); }catch(e){} });
+    }
+    const circleArr = [];
+    for(let i=0;i<path2.length;i+=1){
+      const circle = new AMap.CircleMarker({
+        map: this.map,
+        center: path2[i],
+        strokeWeight: 0,
+        radius: wait2[i],
+        fillColor: color,
+        fillOpacity: 0.5,
+        zIndex: 200,
+        bubble: true
+      });
+      circleArr.push(circle);
+      const t = info2[i];
+      circle.on('mouseover', function(){
+        this.setOptions({strokeWeight:3});
+        const el = that.root.querySelector("#info");
+        if(el){ el.innerText = ''+t; el.style.display = "block"; }
+      });
+      circle.on('mouseout', function(){
+        this.setOptions({strokeWeight:0});
+        const el = that.root.querySelector("#info");
+        if(el){ el.innerText = '移动到圆点查看'; el.style.display = "none"; }
+      });
+    }
+    this.circle[entity] = circleArr;
+  }
+  _gethistory(entity, color, type){
+    const that = this;
+    const win = this._historyWindow();
+    const url = "history/period/" + win.start.toISOString()
+      + "?filter_entity_id=" + encodeURIComponent(entity)
+      + "&significant_changes_only=0"
+      + "&end_time=" + encodeURIComponent(win.end.toISOString());
 
-          let lu = arr[i].last_updated;
-          if(p.longitude) {
-             if (p.speed) {
-               infoArr.push(p.friendly_name + '> 速度：' + p.speed.toString() +  'km/h 到达时间：' + convertUTCTimeToLocalTime(lu) + ' 停留时间:' + radius[1]);
-             } else {
-               infoArr.push(p.friendly_name + '> 到达时间：' + convertUTCTimeToLocalTime(lu) + ' 停留时间:' + radius[1]);
-             }
-          }
-
-        }
-
-        if(type=='gaode'){
-          var path2 = lineArr;
-          var info2 = infoArr;
-          var wait2 = waitArr;
-          if( that.paths[entity]){
-            that.paths[entity].setPath(path2);
-          }else{
-            that.paths[entity] = new AMap.Polyline({
-              map: that.map,
-              path: path2,  
-              zIndex: 200,
-              strokeWeight: 6, 
-              strokeColor: color, 
-              strokeOpacity: 0.5,
-	      showDir: true,
-              lineJoin: 'round' 
-            });
-
-            var circleArr = []
-            for(var i=0;i<path2.length;i+=1){
-              var center = path2[i];
-              var circle = new AMap.CircleMarker({
-                map: that.map,
-                center:center,
-                strokeWeight:0,
-                radius: wait2[i],
-                fillColor:color,
-                fillOpacity:0.5,
-                zIndex:200,
-                bubble:true
-              });
-              circleArr.push(circle)
-              const t = info2[i]
-              circle.on('mouseover', function (e) {
-                   this.setOptions({strokeWeight:3})
-                   var text = '' + t
-                   that.root.querySelector("#info").innerText = text;
-                   that.root.querySelector("#info").style.display = "block"
-      	      });
-              circle.on('mouseout', function (e) {
-                   this.setOptions({strokeWeight:0})
-                   var text = '移动到圆点查看'
-                   that.root.querySelector("#info").innerText = text;
-                   that.root.querySelector("#info").style.display = "none"
-      	      });
-
-            }
-            that.circle[entity] = circleArr
-          }
-        }else{
-          var info2 = infoArr;
-          var wait2 = waitArr;
-          that._convertFrom(lineArr, type, function (err, locations) {
-            if (!err) {
-              var path2 = locations;
-              if( that.paths[entity]){
-                that.paths[entity].setPath(path2);
-              }else{
-                that.paths[entity] = new AMap.Polyline({
-                  map: that.map,
-                  path: path2,  
-                  zIndex: 200,
-                  strokeWeight: 6, 
-                  strokeColor: color, 
-                  strokeOpacity: 0.5,
-	          showDir: true,
-                  lineJoin: 'round' 
-                });
-    
-                var circleArr = []
-                for(var i=0;i<path2.length;i+=1){
-                  var center = path2[i];
-                  var circle = new AMap.CircleMarker({
-                    map: that.map,
-                    center:center,
-                    strokeWeight:0,
-                    radius: wait2[i],
-                    fillColor:color,
-                    fillOpacity:0.5,
-                    zIndex:200,
-                    bubble:true
-                  });
-
-                  circleArr.push(circle)
-                  const t = info2[i]
-                  circle.on('mouseover', function (e) {
-                    var text = '' + t
-                    this.setOptions({strokeWeight:3})
-                    that.root.querySelector("#info").innerText = text;
-                    that.root.querySelector("#info").style.display = "block"
-      	          });
-                  circle.on('mouseout', function (e) {
-                    var text = '移动到圆点查看'
-                    this.setOptions({strokeWeight:0})
-                    that.root.querySelector("#info").innerText = text;
-                    that.root.querySelector("#info").style.display = "none"
-      	          });
-
-                }
-                that.circle[entity] = circleArr
-
-              }
-  
-            }
-          });
-        }
-
-
+    this._hass.callApi("GET", url).then(function(res){
+      // HA 在无历史数据时返回 [](或 [[]])。原实现直接 res[0].length,会抛 TypeError,
+      // 且没有 catch —— 表现为"轨迹就是不出现,控制台也没有线索"。
+      const raw = (res && res.length && res[0]) || [];
+      const arr = controlArrayLength(Array.isArray(raw) ? raw : []);
+      if(arr.length < 2){
+        // 0~1 条记录是正常情况(该时段没移动 / 实体没有 recorder 数据),用 info 而不是 warn
+        that._logOnce("history:"+entity,
+          "实体 "+entity+" 在 "+win.start.toLocaleString()+" ~ "+win.end.toLocaleString()
+          +" 之间只有 "+arr.length+" 个有效记录,不足以绘制轨迹(至少需要 2 个点)。"
+          +"若时间范围不对,请检查配置项 hours_to_show 或卡片底部的时间选择。");
+        return;
       }
-    })
+      if(that.historyPath[entity] == arr.length)return;   // 点数未变,跳过重绘
+      that.historyPath[entity] = arr.length;
+
+      const lineArr = [], infoArr = [], waitArr = [];
+      for(let i=0;i<arr.length;i++){
+        const entry = arr[i] || {};
+        const attr = entry.attributes || {};
+        if(attr.longitude === undefined || attr.latitude === undefined)continue;
+        lineArr.push(new AMap.LngLat(attr.longitude, attr.latitude));
+        const next = arr[i+1];
+        const radius = getRadius(i, entry.last_updated, next ? next.last_updated : undefined);
+        waitArr.push(radius[0]);
+        const name = attr.friendly_name || entity;
+        const lu = entry.last_updated;
+        infoArr.push(attr.speed
+          ? name + '> 速度：' + attr.speed.toString() + 'km/h 到达时间：' + convertUTCTimeToLocalTime(lu) + ' 停留时间:' + radius[1]
+          : name + '> 到达时间：' + convertUTCTimeToLocalTime(lu) + ' 停留时间:' + radius[1]);
+      }
+      if(lineArr.length < 2){
+        that._warnOnce("historypts:"+entity,
+          "实体 "+entity+" 的历史记录里有效坐标点不足 2 个(共 "+arr.length+" 条),无法绘制轨迹。"
+          +"person 实体的历史只在 device_tracker 上报坐标时才产生记录。");
+        return;
+      }
+
+      const draw = function(path2){
+        that._drawTrail(entity, path2, infoArr, waitArr, color || that._entityColor(entity));
+      };
+      // type: gaode 的数据本身已是 GCJ-02,不需要转换
+      if(type === 'gaode'){
+        draw(lineArr);
+      }else{
+        that._convertFrom(lineArr, type, function(err, locations){
+          if(err)return;   // _convertFrom 内部已给出一次性告警与处置建议
+          draw(locations);
+        });
+      }
+    }).catch(function(err){
+      that._warnOnce("historyerr:"+entity,
+        "获取实体 "+entity+" 的历史轨迹失败: "+(err && (err.message || err))
+        +" —— 请确认该实体已被 recorder 记录(history 集成已启用),且时间范围有效");
+    });
   }
   _cssData(){
     var css = `

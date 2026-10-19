@@ -97,6 +97,16 @@
   + 标记点创建不再依赖精度圈:半径非法或无 `gps_accuracy` 时跳过圈,不连累标记点
   + 缺少 `key` / `securityJsCode` 时在连接阶段就明确报错
   + 详细变更与原因见 `docs/变更说明-09-19.md` 的「追加修复（v1.2.11）」一节
+
++ v1.2.12 ( 修复"人员的历史轨迹不显示" )
+  + **修复时间控件取值格式**:`start_time` / `end_time` 原先写入 `yyyy-MM-dd hh:mm`(空格分隔),而 `datetime-local` 只接受 `yyyy-MM-ddTHH:mm` —— 浏览器会把非法值置空,随后 `new Date("")` 得到 Invalid Date,`toISOString()` 抛 `RangeError`,整条轨迹静默消失。现已改为标准格式并显式按本地时间解析
+  + **不再要求配置 `hours_to_show`**:原先只有 `hours_to_show > 0` 才会请求历史,不写这个选项目前永远不会有轨迹。现在默认查询"今天 00:00 至今",配置 `hours_to_show` 则按该时长回溯(底部时间控件仍可手动覆盖)
+  + 历史接口返回空数组 / 请求失败不再静默:`res[0]` 之前会直接抛 TypeError 且无 `catch`,现在有明确的 info/warn 诊断
+  + `hours_to_show` 现在真正生效(此前该配置被注释掉,窗口固定为"今天 00:00 至今")
+  + 轨迹更新时同步重建停留点圆点(此前只 `setPath`,圆点会停在旧位置);追踪模式下刷新轨迹时不再传空颜色(空 `strokeColor` 画出的线不可见)
+  + REST 坐标转换的分批请求改为**串行**发送:1000 点轨迹原本会瞬间并发 25 个请求,极易触发高德 QPS 限制导致整条轨迹失败
+  + 不再改写 `Date.prototype.format`(会污染全局 Date 原型,与其它卡片冲突)
+  + 详细变更与原因见 `docs/变更说明-09-19.md` 的「追加修复（v1.2.12）」一节
   
 ## 预览
 ![](1.gif)
@@ -137,7 +147,7 @@
 | default_zoom | Number | 选项 | 地图默认缩放等级
 | dark_mode | string / boolean | `auto` | 地图样式。`auto` 跟随主题;`true`/`dark` 夜间;`false`/`normal` 白天;也可填高德内置样式名(`light`/`grey`/…)或你在控制台发布的自定义样式 ID。无法识别的取值自动回退 `auto` |
 | traffic | boolean | 选项 | 实时路况
-| hours_to_show | Number | 选项 | 指定时间内的历史路径,这里是填的是小时
+| hours_to_show | Number | 选项 | 历史轨迹时长(小时)。决定默认查询窗口;不配置时默认查询「今天 00:00 至今」。卡片底部的时间选择可手动覆盖 |
 | key | string | **必选** | 自己去高德申请key,内置的key说不定哪天就失效了.
 | securityJsCode | string | 选项 | 高德安全密钥,2021年12月后申请的新Key必填
 | rest_key | string | 选项 | 单独申请的、平台为**Web服务(REST API)**的Key,仅用于坐标转换,见下方说明
@@ -189,6 +199,23 @@ entities:
 - 未配置 `rest_key` 时行为与旧版本完全一致(仍走 `AMap.convertFrom`),不影响现有配置。
 - 历史轨迹可能上千个点,而 REST 坐标转换接口单次上限 40 个点,卡片已自动分批请求。
 - `type: gaode` 的实体本身已是高德(GCJ-02)坐标,不需要转换,也不消耗 `rest_key`。
+
+## 历史轨迹不显示？
+
+按以下顺序排查(v1.2.12 起每一步都有控制台提示):
+
+1. **该时间段是否真的有历史数据**。轨迹默认查询「今天 00:00 至今」;要更长的时间范围请配置
+   `hours_to_show`(单位小时),或用卡片底部的时间选择手动指定。注意 `person` 的历史来自其关联的
+   `device_tracker`,如果只建了 `person` 而没有 GPS 来源,就不会有历史。
+2. **至少需要 2 个带经纬度的记录**才能连成线。控制台会提示「只有 N 个有效记录,不足以绘制轨迹」。
+3. **坐标转换必须可用**。轨迹和标记点用同一套转换逻辑:没有配置 `rest_key` 且 Key 是纯 JS API 平台时,
+   转换必然失败(见上一节)。控制台会出现「坐标转换失败」。
+4. **HA 的 recorder 是否已启用**。历史接口请求失败时会提示 `获取实体 xxx 的历史轨迹失败: ...`,
+   常见原因是 recorder 未启用 / 该实体被 `exclude` 排除。
+5. **点数很多时**会分批请求高德 REST 接口(每批 40 点,串行发送)。若控制台出现
+   `CUQPS_HAS_EXCEEDED_THE_LIMIT`,说明并发或频率超过 Key 配额,可缩短 `hours_to_show`。
+
+`hours_to_show` 只在**首次建立标记点**时决定默认窗口;之后修改需要刷新页面(或改卡片配置触发重建)。
 
 ## 关于 `Cannot read properties of undefined (reading 'pn')`
 

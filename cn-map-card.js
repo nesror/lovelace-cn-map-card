@@ -1,4 +1,4 @@
-console.info("%c  GAODE MAP CARD  \n%c Version 1.2.12 ",
+console.info("%c  GAODE MAP CARD  \n%c Version 1.2.13 ",
 "color: orange; font-weight: bold; background: black", 
 "color: white; font-weight: bold; background: dimgray");
 
@@ -800,6 +800,7 @@ class GaodeMapCard extends HTMLElement {
     this.fit = 0; 
     this.trace = false;
     this.historyPath = {};
+    this._trailRetry = {};   // 每个实体的轨迹重试计数/下次允许时间
     this.loaded = false;
     this.loadst = false;
     
@@ -896,6 +897,27 @@ class GaodeMapCard extends HTMLElement {
   }
   disconnectedCallback(){
     if (this._resizeObserver) this._resizeObserver.disconnect();
+    // 必须连地图和派生状态一起清掉。卡片切换视图 / 进出编辑模式时会先 disconnect 再 connect,
+    // connectedCallback 会重新 _loadMap 建一张新地图;若这里只断开 observer,
+    // 旧的 loaded / markers / paths 会残留 —— 新地图上没有这些对象,而 set hass 又因为
+    // entities 没变不会重建,表现为"切回来以后标记点和历史轨迹都不见了"。
+    if (this.map) {
+      try { this.map.destroy(); } catch (e) {}
+      this.map = null;
+    }
+    this.loaded = false;
+    this.markers = {};
+    this.paths = {};
+    this.circle = {};
+    this.historyPath = {};
+    this._trailRetry = {};
+    this.persons = [];
+    this.positions = {};
+    this.oldentities = [];
+    this.fit = 0;
+    this.trace = false;
+    let fitButton = this.root.querySelector("#fitbutton");
+    if (fitButton) fitButton.classList.remove("active");
   }
   static getConfigElement() {
     return document.createElement("gaode-map-card-editor");
@@ -935,6 +957,7 @@ class GaodeMapCard extends HTMLElement {
       this.paths = {};
       this.circle = {};
       this.historyPath = {};
+      this._trailRetry = {};
       this.persons = [];   // clearMap() 已销毁旧 marker,这里必须同步丢弃引用,否则 setFitView 会拿到已销毁的 marker
       this.fit = 0;        // 重置计数,否则实体变更后 _checkFit 永远达不到 entities.length
       this.entities.forEach(function(entity,index) {
@@ -951,6 +974,9 @@ class GaodeMapCard extends HTMLElement {
         let type = this.entities[i].type?this.entities[i].type:"gps";
         this._updateMarker(entityt,type);
       }
+      // 补画缺失的轨迹。历史请求/坐标转换可能因 HA 启动中、高德 QPS、网络抖动等原因
+      // 一次性失败;旧实现只在建立标记点那一次尝试,失败后除非刷新页面否则永远不再重试。
+      this._retryTrails();
       //实时追踪
       if(this.trace){
         let angle = this.config.angle?hass.states[this.config.angle].state:0;
@@ -1452,11 +1478,15 @@ class GaodeMapCard extends HTMLElement {
     }
     const circleArr = [];
     for(let i=0;i<path2.length;i+=1){
+      // 停留时长算不出来时 getRadius 会返回 NaN,NaN 传给 radius 会让高德抛错,
+      // 进而把整段绘制打断。这里兜底成最小可见半径。
+      let r = Number(wait2[i]);
+      if(!isFinite(r) || r <= 0)r = 4;
       const circle = new AMap.CircleMarker({
         map: this.map,
         center: path2[i],
         strokeWeight: 0,
-        radius: wait2[i],
+        radius: r,
         fillColor: color,
         fillOpacity: 0.5,
         zIndex: 200,
@@ -1477,12 +1507,37 @@ class GaodeMapCard extends HTMLElement {
     }
     this.circle[entity] = circleArr;
   }
+  // 补画缺失轨迹。历史请求可能因 HA 启动中 / 高德 QPS / 网络抖动一次性失败,
+  // 旧实现只在建立标记点那一次尝试,失败后不刷新页面就永远不再重试。
+  // 这里按实体做有限重试(最多 3 次,间隔 30/60/90 秒),成功后 paths[entity] 存在即停止。
+  _retryTrails(){
+    if(!this.loaded || !this.map)return;
+    const list = this.entities || [];
+    const now = Date.now();
+    for(let i=0;i<list.length;i++){
+      const item = list[i];
+      const id = typeof item === 'string'?item:item.entity;
+      if(!id)continue;
+      const domain = id.split('.')[0];
+      if(domain!=='person' && domain!=='device_tracker')continue;
+      if(this.paths[id])continue;                       // 已经有轨迹了
+      const st = this._trailRetry[id] || (this._trailRetry[id] = {attempts:0, nextAt:0});
+      if(st.attempts >= 3 || now < st.nextAt)continue;
+      const state = this._hass && this._hass.states[id];
+      if(!state || state.attributes.longitude === undefined)continue;
+      st.attempts++;
+      st.nextAt = now + 30000*st.attempts;
+      const type = (typeof item === 'string' || !item.type) ? 'gps' : item.type;
+      this._gethistory(id, this._entityColor(id), type);
+    }
+  }
   _gethistory(entity, color, type){
     const that = this;
     const win = this._historyWindow();
+    // 不再携带 significant_changes_only:默认就返回全部状态变化,显式传参在新版 HA 上没有收益,
+    // 反而可能因为参数变动导致请求被拒。
     const url = "history/period/" + win.start.toISOString()
       + "?filter_entity_id=" + encodeURIComponent(entity)
-      + "&significant_changes_only=0"
       + "&end_time=" + encodeURIComponent(win.end.toISOString());
 
     this._hass.callApi("GET", url).then(function(res){
@@ -1499,7 +1554,6 @@ class GaodeMapCard extends HTMLElement {
         return;
       }
       if(that.historyPath[entity] == arr.length)return;   // 点数未变,跳过重绘
-      that.historyPath[entity] = arr.length;
 
       const lineArr = [], infoArr = [], waitArr = [];
       for(let i=0;i<arr.length;i++){
@@ -1524,7 +1578,18 @@ class GaodeMapCard extends HTMLElement {
       }
 
       const draw = function(path2){
-        that._drawTrail(entity, path2, infoArr, waitArr, color || that._entityColor(entity));
+        try{
+          that._drawTrail(entity, path2, infoArr, waitArr, color || that._entityColor(entity));
+          // 只有真正画成功才记下点数 —— 旧实现在转换前就写入,一次失败后同点数的重试会被
+          // 这里的去重直接挡掉,轨迹就再也补不回来了。
+          that.historyPath[entity] = arr.length;
+          if(that._trailRetry)delete that._trailRetry[entity];
+          that._logOnce("historyok:"+entity,
+            "实体 "+entity+" 轨迹已绘制: 返回 "+arr.length+" 条记录, 有效坐标 "+lineArr.length+" 个, "
+            +"窗口 "+win.start.toLocaleString()+" ~ "+win.end.toLocaleString());
+        }catch(e){
+          console.warn("GaodeMapCard: 实体 "+entity+" 轨迹绘制失败", e);
+        }
       };
       // type: gaode 的数据本身已是 GCJ-02,不需要转换
       if(type === 'gaode'){
